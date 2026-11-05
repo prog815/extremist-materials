@@ -1,1 +1,226 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Федеральный список экстремистских материалов (Минюст)</title>
+    <meta name="description" content="Интерактивный справочник: Федеральный список экстремистских материалов. Поиск по тексту, номеру и дате включения.">
+    <link rel="icon" href="https://prog815.github.io/favicon.svg?v=1.0.0" type="image/svg+xml">
+    <script src="https://prog815.github.io/share.js?v=1.0.1" defer></script>
+    <style>
+        /* Стили v-next.2 */
+        :root {
+            --bg: #f5f7fb; --card: #ffffff; --text: #0f172a; --muted: #5b6b7f;
+            --accent: #2563eb; --border: #e2e8f0; --radius: 12px;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root { --bg: #0b1120; --card: #111a2c; --text: #e6edf7; --muted: #94a3b8; --border: #1e293b; --accent: #60a5fa; }
+        }
+        body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; line-height: 1.5; }
+        .container { max-width: 900px; margin: 0 auto; }
+        
+        /* Баннер на хаб */
+        .klassik-banner { display: block; max-width: 1200px; margin: 0 auto 20px; text-decoration: none; }
+        .klassik-banner img { width: 100%; height: auto; border-radius: 8px; }
 
+        /* Поиск */
+        .search-box { margin-bottom: 20px; position: sticky; top: 0; background: var(--bg); padding: 15px 0; z-index: 10; }
+        input[type="search"] { width: 100%; padding: 15px; border-radius: var(--radius); border: 1px solid var(--border); font-size: 16px; background: var(--card); color: var(--text); box-sizing: border-box; }
+        .search-meta { display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px; color: var(--muted); }
+
+        /* Карточки */
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 16px; transition: box-shadow 0.2s; }
+        .card.highlight { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+        .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+        .card-num { font-weight: bold; color: var(--accent); font-size: 16px; }
+        .card-date { font-size: 14px; color: var(--muted); }
+        .card-material { font-size: 16px; margin-bottom: 15px; white-space: pre-wrap; }
+        
+        /* Кнопки */
+        .card-actions { display: flex; gap: 10px; border-top: 1px solid var(--border); padding-top: 12px; }
+        button { background: transparent; border: 1px solid var(--border); padding: 8px 12px; border-radius: 8px; cursor: pointer; color: var(--text); font-size: 14px; display: flex; align-items: center; gap: 6px; }
+        button:hover { background: var(--accent); color: white; border-color: var(--accent); }
+        button svg { width: 16px; height: 16px; }
+
+        /* Пагинация */
+        .pagination { text-align: center; margin: 20px 0; }
+        .pagination button { margin: 0 auto; padding: 12px 24px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="https://prog815.github.io/" class="klassik-banner">
+            <img src="https://prog815.github.io/banner.svg?v=1.0.0" alt="Экосистема «Классик»">
+        </a>
+
+        <div class="search-box">
+            <input type="search" id="search" placeholder="Поиск по материалу, номеру или дате...">
+            <div class="search-meta">
+                <span id="results-count">Загрузка...</span>
+                <a href="#" id="clear-search" style="color: var(--accent); text-decoration: none; display: none;">Очистить</a>
+            </div>
+        </div>
+
+        <div id="list"></div>
+
+        <div class="pagination">
+            <button id="load-more" style="display: none;">Показать ещё +20</button>
+        </div>
+    </div>
+
+    <script>
+        let allData = [];
+        let filteredData = [];
+        let visibleCount = 20;
+        let searchQuery = '';
+
+        // Вспомогательные функции
+        function normalizeStr(s) { return s ? s.toLowerCase().replace(/ё/g, 'е') : ''; }
+        
+        function formatDate(d) {
+            if (!d) return '';
+            const parts = d.split('.');
+            if (parts.length === 3) return `${parts[0]}.${parts[1]}.${parts[2]}`;
+            return d;
+        }
+
+        // Инициализация
+        async function init() {
+            try {
+                const res = await fetch('./web/extremist.json.gz');
+                const ds = new DecompressionStream('gzip');
+                const decompressedStream = res.body.pipeThrough(ds);
+                const text = await new Response(decompressedStream).text();
+                allData = JSON.parse(text);
+                
+                const metaRes = await fetch('./web/extremist_meta.json.gz');
+                const metaDs = new DecompressionStream('gzip');
+                const metaText = await new Response(metaRes.body.pipeThrough(metaDs)).text();
+                const meta = JSON.parse(metaText);
+                
+                document.title = meta.classifier_full_name;
+                
+                // Проверка ?code=
+                const urlParams = new URLSearchParams(window.location.search);
+                const code = urlParams.get('code');
+                if (code) {
+                    document.getElementById('search').value = code;
+                    searchQuery = normalizeStr(code);
+                }
+
+                filterData();
+            } catch (err) {
+                console.error(err);
+                document.getElementById('results-count').textContent = 'Ошибка загрузки данных';
+            }
+        }
+
+        // Фильтрация
+        function filterData() {
+            const terms = searchQuery.split(' ').filter(t => t);
+            if (terms.length === 0) {
+                filteredData = allData;
+            } else {
+                filteredData = allData.filter(item => {
+                    const blob = normalizeStr(item[1] + ' ' + item[2] + ' ' + item[3] + ' ' + item[0]);
+                    return terms.every(term => blob.includes(term));
+                });
+            }
+            
+            if (searchQuery) {
+                document.getElementById('clear-search').style.display = 'block';
+            } else {
+                document.getElementById('clear-search').style.display = 'none';
+            }
+            
+            visibleCount = 20;
+            render();
+        }
+
+        // Рендер
+        function render() {
+            const list = document.getElementById('list');
+            list.innerHTML = '';
+            
+            document.getElementById('results-count').textContent = `Найдено: ${filteredData.length} из ${allData.length}`;
+            
+            const toRender = filteredData.slice(0, visibleCount);
+            
+            toRender.forEach(item => {
+                const [id, num, material, date] = item;
+                
+                // Безопасный HTML (экранирование)
+                const safeMaterial = material.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                const safeNum = num.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                
+                const card = document.createElement('article');
+                card.className = 'card';
+                card.id = id;
+                
+                // Подсветка при переходе по ?code=
+                if (searchQuery === normalizeStr(id) || (searchQuery && id.includes(searchQuery.toUpperCase()))) {
+                    card.classList.add('highlight');
+                }
+
+                card.innerHTML = `
+                    <div class="card-header">
+                        <span class="card-num">№ ${safeNum}</span>
+                        <span class="card-date">Включено: ${formatDate(date)}</span>
+                    </div>
+                    <div class="card-material">${safeMaterial}</div>
+                    <div class="card-actions">
+                        <button onclick="copyRow(this, '${id}', '${safeNum}', '${safeMaterial.replace(/'/g, "\\'")}')">📋 строка</button>
+                        <klassik-share data-title="Федеральный список экстремистских материалов" data-text="№ ${safeNum}: ${safeMaterial.substring(0,100)}..." data-url="${window.location.origin}${window.location.pathname}?code=${id}">
+                            <button>📤 Поделиться</button>
+                        </klassik-share>
+                    </div>
+                `;
+                list.appendChild(card);
+            });
+
+            const loadMoreBtn = document.getElementById('load-more');
+            if (visibleCount < filteredData.length) {
+                loadMoreBtn.style.display = 'inline-block';
+            } else {
+                loadMoreBtn.style.display = 'none';
+            }
+        }
+
+        // Копирование
+        function copyRow(btn, id, num, material) {
+            const text = `№ ${num}\n${material}\n\nID: ${id}`;
+            navigator.clipboard.writeText(text).then(() => {
+                const orig = btn.innerHTML;
+                btn.innerHTML = '✅ Скопировано';
+                setTimeout(() => btn.innerHTML = orig, 2000);
+                if(window.ym) ym(105817342, 'reachGoal', 'copy_row');
+                if(window.gtag) gtag('event', 'copy_row');
+            });
+        }
+
+        // Обработчики
+        let debounceTimer;
+        document.getElementById('search').addEventListener('input', (e) => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                searchQuery = normalizeStr(e.target.value);
+                filterData();
+            }, 180);
+        });
+
+        document.getElementById('clear-search').addEventListener('click', (e) => {
+            e.preventDefault();
+            document.getElementById('search').value = '';
+            searchQuery = '';
+            filterData();
+        });
+
+        document.getElementById('load-more').addEventListener('click', () => {
+            visibleCount += 20;
+            render();
+        });
+
+        init();
+    </script>
+</body>
+</html>
