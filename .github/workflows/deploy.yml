@@ -1,1 +1,75 @@
+name: Update Extremist Materials Data
 
+on:
+  schedule:
+    - cron: '0 17 * * 3' # Каждую среду в 20:00 МСК
+  workflow_dispatch:
+
+jobs:
+  update-data:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Kaggle CLI
+        run: pip install kaggle
+
+      - name: Download latest artifacts from Kaggle
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_API_TOKEN_EXTREMIST_MATERIALS }}
+        run: |
+          # Скачиваем вывод последней версии тетрадки
+          kaggle kernels output eavprog/minjust-extremist-materials-downloader -p ./output
+
+      - name: Check DATA_CHANGED gate
+        id: check_data
+        run: |
+          SRC="./output/extremist_data/web"
+          NEW_META="$SRC/extremist_meta.json.gz"
+          
+          if [ ! -f "$NEW_META" ]; then
+            echo "::error::Meta file not found!"
+            exit 1
+          fi
+          
+          # Распаковываем новую мету, чтобы достать data_hash
+          gzip -d -c "$NEW_META" > new_meta.json
+          NEW_HASH=$(jq -r '.data_hash' new_meta.json)
+          
+          OLD_HASH=""
+          if [ -f "./web/extremist_meta.json.gz" ]; then
+            gzip -d -c "./web/extremist_meta.json.gz" > old_meta.json
+            OLD_HASH=$(jq -r '.data_hash' old_meta.json)
+          fi
+          
+          if [ "$NEW_HASH" == "$OLD_HASH" ]; then
+            echo "Data not changed. Exiting."
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "Data changed!"
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update data files
+        if: steps.check_data.outputs.changed == 'true'
+        run: |
+          mkdir -p ./web
+          cp ./output/extremist_data/web/extremist.json.gz ./web/
+          cp ./output/extremist_data/web/extremist_meta.json.gz ./web/
+
+      - name: Commit and push
+        if: steps.check_data.outputs.changed == 'true'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add ./web/*
+          git commit -m "Auto-update: extremist materials registry ($(date +'%Y-%m-%d'))"
+          git push
