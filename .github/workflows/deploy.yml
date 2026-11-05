@@ -1,75 +1,94 @@
-name: Update Extremist Materials Data
+name: Daily Extremist Materials Update
 
 on:
   schedule:
-    - cron: '0 17 * * 3' # Каждую среду в 20:00 МСК
-  workflow_dispatch:
+    - cron: '0 15 * * *'      # 15:00 UTC = 18:00 МСК (разнесено с другими справочниками)
+  workflow_dispatch:          # ручной запуск
 
 jobs:
-  update-data:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
+  sync-and-trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write         # встроенный токен Actions для коммита
+    env:
+      # API-токен Kaggle (CLI >= 1.8.0).
+      # В репозитории секрет называется KAGGLE_API_TOKEN_EXTREMIST_MATERIALS.
+      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN_EXTREMIST_MATERIALS }}
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/checkout@v5
         with:
-          python-version: '3.11'
+          fetch-depth: 0
 
-      - name: Install Kaggle CLI
-        run: pip install kaggle six
-
-      - name: Download latest artifacts from Kaggle
-        env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-          KAGGLE_KEY: ${{ secrets.KAGGLE_API_TOKEN_EXTREMIST_MATERIALS }}
+      - name: Install Kaggle CLI с поддержкой API-токенов (>= 1.8.0)
         run: |
-          # Скачиваем вывод последней версии тетрадки
+          pip install -q --upgrade kaggle
+          kaggle --version
+          python - <<'EOF'
+          import re, subprocess
+          out = subprocess.check_output(["kaggle", "--version"], text=True).strip()
+          m = re.search(r"(\d+)\.(\d+)", out)
+          assert m and tuple(map(int, m.groups())) >= (1, 8), \
+              f"нужен kaggle CLI >= 1.8.0 для API-токенов, получен: {out}"
+          print("OK: kaggle CLI поддерживает API-токены")
+          EOF
+
+      - name: Download latest kernel output
+        run: |
+          mkdir -p ./output
           kaggle kernels output eavprog/minjust-extremist-materials-downloader -p ./output
+          echo "Содержимое output:"
+          find ./output -maxdepth 4 -type f | head -30
+          echo ""
+          echo "--- Попытка показать лог/диагностику тетрадки (если есть) ---"
+          for f in ./output/*.log ./output/*.txt ./output/__notebook*.ipynb; do
+            [ -f "$f" ] && { echo ">>> $f (last 50 lines) >>>"; tail -n 50 "$f"; echo "<<< $f <<<"; echo ""; }
+          done || true
 
-      - name: Check DATA_CHANGED gate
-        id: check_data
+      - name: Copy web files to repo root (не падает, ставит флаг)
+        id: copy
         run: |
-          SRC="./output/extremist_data/web"
-          NEW_META="$SRC/extremist_meta.json.gz"
-          
-          if [ ! -f "$NEW_META" ]; then
-            echo "::error::Meta file not found!"
-            exit 1
-          fi
-          
-          # Распаковываем новую мету, чтобы достать data_hash
-          gzip -d -c "$NEW_META" > new_meta.json
-          NEW_HASH=$(jq -r '.data_hash' new_meta.json)
-          
-          OLD_HASH=""
-          if [ -f "./web/extremist_meta.json.gz" ]; then
-            gzip -d -c "./web/extremist_meta.json.gz" > old_meta.json
-            OLD_HASH=$(jq -r '.data_hash' old_meta.json)
-          fi
-          
-          if [ "$NEW_HASH" == "$OLD_HASH" ]; then
-            echo "Data not changed. Exiting."
-            echo "changed=false" >> $GITHUB_OUTPUT
+          # Тетрадка пишет публикуемые артефакты В ПОДПАПКУ extremist_data/web
+          SRC=./output/extremist_data/web
+          MISSING=0
+          for f in extremist.json extremist.json.gz extremist_meta.json extremist_meta.json.gz; do
+            if [ -f "$SRC/$f" ]; then
+              cp "$SRC/$f" "./$f"
+              echo "copied $f"
+            else
+              echo "::warning::MISSING $f в $SRC (тетрадка, вероятно, упала или писала не туда)"
+              MISSING=$((MISSING+1))
+            fi
+          done
+          if [ "$MISSING" -gt 0 ]; then
+            echo "❌ Отсутствует $MISSING из 4 файлов — коммит пропущен, сайт остаётся на последней хорошей версии"
+            echo "FILES_OK=false" >> "$GITHUB_ENV"
           else
-            echo "Data changed!"
-            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "✅ Все 4 файла на месте"
+            echo "FILES_OK=true" >> "$GITHUB_ENV"
           fi
 
-      - name: Update data files
-        if: steps.check_data.outputs.changed == 'true'
+      - name: Commit and push changes
+        if: env.FILES_OK == 'true'
         run: |
-          mkdir -p ./web
-          cp ./output/extremist_data/web/extremist.json.gz ./web/
-          cp ./output/extremist_data/web/extremist_meta.json.gz ./web/
+          git config --local user.email "github-actions@github.com"
+          git config --local user.name "GitHub Actions"
+          git add extremist.json extremist.json.gz extremist_meta.json extremist_meta.json.gz
+          if git diff --cached --quiet; then
+            echo "✅ Изменений нет — данные уже актуальны"
+          else
+            SOURCE_DATE=$(python -c "import json;print(json.load(open('extremist_meta.json')).get('source_date','?'))")
+            git commit -m "Auto-update: Extremist Materials data (source $SOURCE_DATE) [skip ci]"
+            git push
+            echo "✅ Изменения запушены"
+          fi
 
-      - name: Commit and push
-        if: steps.check_data.outputs.changed == 'true'
+      - name: Trigger new notebook run (fire-and-forget, всегда)
+        if: always()
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add ./web/*
-          git commit -m "Auto-update: extremist materials registry ($(date +'%Y-%m-%d'))"
-          git push
+          mkdir -p ./nb
+          kaggle kernels pull eavprog/minjust-extremist-materials-downloader -p ./nb --metadata
+          kaggle kernels push -p ./nb
+          echo "✅ Тетрадка перезапущена (round-trip); workflow не ждёт её завершения"
