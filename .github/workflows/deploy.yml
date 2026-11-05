@@ -1,8 +1,8 @@
-name: Daily Extremist Materials Update
+name: Weekly Extremist Materials Update
 
 on:
   schedule:
-    - cron: '0 15 * * *'      # 15:00 UTC = 18:00 МСК
+    - cron: '0 17 * * 3'      # 17:00 UTC (20:00 МСК) по средам
   workflow_dispatch:          # ручной запуск
 
 jobs:
