@@ -2,7 +2,7 @@ name: Daily Extremist Materials Update
 
 on:
   schedule:
-    - cron: '0 15 * * *'      # 15:00 UTC = 18:00 МСК (разнесено с другими справочниками)
+    - cron: '0 15 * * *'      # 15:00 UTC = 18:00 МСК
   workflow_dispatch:          # ручной запуск
 
 jobs:
@@ -13,7 +13,6 @@ jobs:
       contents: write         # встроенный токен Actions для коммита
     env:
       # API-токен Kaggle (CLI >= 1.8.0).
-      # В репозитории секрет называется KAGGLE_API_TOKEN_EXTREMIST_MATERIALS.
       KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN_EXTREMIST_MATERIALS }}
 
     steps:
@@ -41,19 +40,14 @@ jobs:
           kaggle kernels output eavprog/minjust-extremist-materials-downloader -p ./output
           echo "Содержимое output:"
           find ./output -maxdepth 4 -type f | head -30
-          echo ""
-          echo "--- Попытка показать лог/диагностику тетрадки (если есть) ---"
-          for f in ./output/*.log ./output/*.txt ./output/__notebook*.ipynb; do
-            [ -f "$f" ] && { echo ">>> $f (last 50 lines) >>>"; tail -n 50 "$f"; echo "<<< $f <<<"; echo ""; }
-          done || true
 
-      - name: Copy web files to repo root (не падает, ставит флаг)
+      - name: Copy web files to repo root (только .gz)
         id: copy
         run: |
-          # Тетрадка пишет публикуемые артефакты В ПОДПАПКУ extremist_data/web
+          # Публикуем ТОЛЬКО .gz файлы (стандарт v-next.2)
           SRC=./output/extremist_data/web
           MISSING=0
-          for f in extremist.json extremist.json.gz extremist_meta.json extremist_meta.json.gz; do
+          for f in extremist.json.gz extremist_meta.json.gz; do
             if [ -f "$SRC/$f" ]; then
               cp "$SRC/$f" "./$f"
               echo "copied $f"
@@ -63,10 +57,10 @@ jobs:
             fi
           done
           if [ "$MISSING" -gt 0 ]; then
-            echo "❌ Отсутствует $MISSING из 4 файлов — коммит пропущен, сайт остаётся на последней хорошей версии"
+            echo "❌ Отсутствует $MISSING из 2 файлов — коммит пропущен, сайт остаётся на последней хорошей версии"
             echo "FILES_OK=false" >> "$GITHUB_ENV"
           else
-            echo "✅ Все 4 файла на месте"
+            echo "✅ Все 2 файла на месте"
             echo "FILES_OK=true" >> "$GITHUB_ENV"
           fi
 
@@ -75,11 +69,12 @@ jobs:
         run: |
           git config --local user.email "github-actions@github.com"
           git config --local user.name "GitHub Actions"
-          git add extremist.json extremist.json.gz extremist_meta.json extremist_meta.json.gz
+          git add extremist.json.gz extremist_meta.json.gz
           if git diff --cached --quiet; then
             echo "✅ Изменений нет — данные уже актуальны"
           else
-            SOURCE_DATE=$(python -c "import json;print(json.load(open('extremist_meta.json')).get('source_date','?'))")
+            # Извлекаем дату из .gz без распаковки в файл
+            SOURCE_DATE=$(gzip -d -c extremist_meta.json.gz | python -c "import sys, json; print(json.load(sys.stdin).get('source_date','?'))")
             git commit -m "Auto-update: Extremist Materials data (source $SOURCE_DATE) [skip ci]"
             git push
             echo "✅ Изменения запушены"
